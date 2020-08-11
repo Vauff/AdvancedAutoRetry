@@ -10,13 +10,13 @@ public Plugin myinfo =
 	name = "Advanced Auto Retry",
 	author = "Vauff",
 	description = "A toggleable auto retry system for custom particles that only retries players when actually necessary",
-	version = "1.0",
+	version = "1.1",
 	url = "https://github.com/Vauff/AdvancedAutoRetry"
 };
 
 ConVar g_cvEnabled, g_cvApiUrl, g_cvToken;
 Handle g_hAutoRetryDisabled;
-StringMap g_smPlayerRetried;
+StringMap g_smPlayerConnections, g_smPlayerConnectionTime, g_smPlayerRetryState, g_smPlayerCountdown;
 HTTPClient g_hHTTPClient;
 
 bool g_bParticles = false;
@@ -50,36 +50,44 @@ public void OnMapStart()
 	else
 		g_bParticles = false;
 
-	if (g_smPlayerRetried != null)
-		CloseHandle(g_smPlayerRetried);
+	if (g_smPlayerConnections != null)
+		CloseHandle(g_smPlayerConnections);
 
-	g_smPlayerRetried = CreateTrie();
+	if (g_smPlayerConnectionTime != null)
+		CloseHandle(g_smPlayerConnectionTime);
+	
+	if (g_smPlayerRetryState != null)
+		CloseHandle(g_smPlayerRetryState);
+
+	if (g_smPlayerCountdown != null)
+		CloseHandle(g_smPlayerCountdown);
+
+	g_smPlayerConnections = CreateTrie();
+	g_smPlayerConnectionTime = CreateTrie();
+	g_smPlayerRetryState = CreateTrie();
+	g_smPlayerCountdown = CreateTrie();
 }
 
 public void OnClientPostAdminCheck(int client)
 {
+	if (!g_bParticles || !g_cvEnabled.BoolValue)
+		return;
+
 	char cookieState[2];
 	GetClientCookie(client, g_hAutoRetryDisabled, cookieState, sizeof(cookieState));
 
 	char steamID[32];
-	bool playerRetried;
 	GetClientAuthId(client, AuthId_SteamID64, steamID, sizeof(steamID));
 
-	if (!GetTrieValue(g_smPlayerRetried, steamID, playerRetried))
-		playerRetried = false;
+	int playerConnections = 0;
+	GetTrieValue(g_smPlayerConnections, steamID, playerConnections);
+	playerConnections += 1;
+	SetTrieValue(g_smPlayerConnections, steamID, playerConnections);
 
-	if (g_bParticles && g_cvEnabled.BoolValue && !StrEqual(cookieState, "1") && !playerRetried)
-	{
-		char url[PLATFORM_MAX_PATH];
-		char ip[32];
-		char map[128];
+	SetTrieValue(g_smPlayerConnectionTime, steamID, GetTime());
 
-		GetClientIP(client, ip, sizeof(ip));
-		GetCurrentMap(map, sizeof(map));
-		Format(url, sizeof(url), "clientdownloaded/%s/%s", ip, map);
-
-		g_hHTTPClient.Get(url, OnApiHttpResponse, GetClientUserId(client));
-	}
+	if (!StrEqual(cookieState, "1") && playerConnections < 2)
+		SendApiHttpRequest(client);
 }
 
 public void ApiConVarChanged(ConVar convar, const char[] oldValue, const char[] newValue)
@@ -124,21 +132,98 @@ void OnApiHttpResponse(HTTPResponse response, any data)
 		return;
 	}
 
+	char steamID[32];
+	GetClientAuthId(client, AuthId_SteamID64, steamID, sizeof(steamID));
+
+	int playerRetryState = 0;
+	GetTrieValue(g_smPlayerRetryState, steamID, playerRetryState);
+
 	JSONObject json = view_as<JSONObject>(response.Data);
 
-	char jsonString[128];
-	json.ToString(jsonString, sizeof(jsonString));
+	if (json.GetBool("clientDownloaded"))
+	{
+		int playerConnectionTime = 0;
+		GetTrieValue(g_smPlayerConnectionTime, steamID, playerConnectionTime);
+
+		if ((playerConnectionTime + 5) < GetTime() || playerRetryState == 1)
+		{
+			SetTrieValue(g_smPlayerCountdown, steamID, 5);
+			CreateTimer(0.0, CountdownTimer, data);
+			CreateTimer(1.0, CountdownTimer, data);
+			CreateTimer(2.0, CountdownTimer, data);
+			CreateTimer(3.0, CountdownTimer, data);
+			CreateTimer(4.0, CountdownTimer, data);
+			CreateTimer(5.0, RetryTimer, data);
+		}
+		else
+		{
+			ClientCommand(client, "retry");
+		}
+	}
+	else if (playerRetryState == 0)
+	{
+		//so fun thing, apparently there is a small chance cloudflare will not return a map download request if it is requested too soon
+		//to keep fast retries for the majority of requests that do work properly initially, we just do a double check 60 seconds after any false response from the api
+		CreateTimer(60.0, ApiRetryTimer, data);
+		SetTrieValue(g_smPlayerRetryState, steamID, 1);
+	}
+
+	CloseHandle(json);
+}
+
+public Action ApiRetryTimer(Handle timer, int userid)
+{
+	int client = GetClientOfUserId(userid);
+
+	if (!IsValidClient(client))
+		return Plugin_Handled;
+
+	SendApiHttpRequest(client);
+
+	return Plugin_Handled;
+}
+
+public Action CountdownTimer(Handle timer, int userid)
+{
+	int client = GetClientOfUserId(userid);
+
+	if (!IsValidClient(client))
+		return Plugin_Handled;
 
 	char steamID[32];
 	GetClientAuthId(client, AuthId_SteamID64, steamID, sizeof(steamID));
 
-	if (json.GetBool("clientDownloaded"))
-	{
-		SetTrieValue(g_smPlayerRetried, steamID, true);
-		ClientCommand(client, "retry");
-	}
+	int seconds = 0;
+	GetTrieValue(g_smPlayerCountdown, steamID, seconds);
+	PrintToChat(client, " \x0F[AdvancedAutoRetry] \x05Your downloading of the map was detected late, you will be auto retried in %i seconds", seconds);
+	SetTrieValue(g_smPlayerCountdown, steamID, seconds - 1);
 
-	CloseHandle(json);
+	return Plugin_Handled;
+}
+
+public Action RetryTimer(Handle timer, int userid)
+{
+	int client = GetClientOfUserId(userid);
+
+	if (!IsValidClient(client))
+		return Plugin_Handled;
+
+	ClientCommand(client, "retry");
+
+	return Plugin_Handled;
+}
+
+void SendApiHttpRequest(int client)
+{
+	char url[PLATFORM_MAX_PATH];
+	char ip[32];
+	char map[128];
+
+	GetClientIP(client, ip, sizeof(ip));
+	GetCurrentMap(map, sizeof(map));
+	Format(url, sizeof(url), "clientdownloaded/%s/%s", ip, map);
+
+	g_hHTTPClient.Get(url, OnApiHttpResponse, GetClientUserId(client));
 }
 
 void UpdateHttpClient()
@@ -154,7 +239,7 @@ void UpdateHttpClient()
 	
 	g_hHTTPClient = new HTTPClient(apiUrl);
 	g_hHTTPClient.SetHeader("Token", token);
-	g_hHTTPClient.ConnectTimeout = 30;
+	g_hHTTPClient.ConnectTimeout = 60;
 }
 
 bool IsValidClient(int client, bool nobots = false)

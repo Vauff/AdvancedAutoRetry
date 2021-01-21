@@ -10,23 +10,24 @@ public Plugin myinfo =
 	name = "Advanced Auto Retry",
 	author = "Vauff",
 	description = "A toggleable auto retry system for custom particles that only retries players when actually necessary",
-	version = "1.1",
+	version = "1.2",
 	url = "https://github.com/Vauff/AdvancedAutoRetry"
 };
 
 ConVar g_cvEnabled, g_cvApiUrl, g_cvToken;
 Handle g_hAutoRetryDisabled;
-StringMap g_smPlayerConnections, g_smPlayerConnectionTime, g_smPlayerRetryState, g_smPlayerCountdown;
+StringMap g_smPlayerConnections, g_smPlayerConnectionTime, g_smPlayerCountdown;
 HTTPClient g_hHTTPClient;
 
 bool g_bParticles = false;
+char g_sMap[128];
 
 public void OnPluginStart()
 {
 	g_cvEnabled = CreateConVar("sm_aar_enabled", "1", "Whether the plugin is enabled or not");
-	g_cvApiUrl = CreateConVar("sm_aar_api_url", "", "URL that the Advanced Auto Retry API is running at", FCVAR_PROTECTED);
-	g_cvToken = CreateConVar("sm_aar_api_token", "", "Token for the Advanced Auto Retry API", FCVAR_PROTECTED);
-	g_hAutoRetryDisabled = RegClientCookie("aar_disabled", "", CookieAccess_Protected);
+	g_cvApiUrl = CreateConVar("sm_aar_api_url", "", "URL that the API worker is running at", FCVAR_PROTECTED);
+	g_cvToken = CreateConVar("sm_aar_api_token", "", "Token for the API worker", FCVAR_PROTECTED);
+	g_hAutoRetryDisabled = RegClientCookie("aar_disabled_new", "", CookieAccess_Protected);
 
 	RegConsoleCmd("sm_autoretry", Command_AutoRetryToggle, "Toggles the auto retry feature for maps with particles on or off");
 
@@ -38,11 +39,11 @@ public void OnPluginStart()
 
 public void OnMapStart()
 {
-	char map[128];
 	char filePath[147];
 
-	GetCurrentMap(map, sizeof(map));
-	Format(filePath, sizeof(filePath), "maps/%s_particles.txt", map);
+	GetCurrentMap(g_sMap, sizeof(g_sMap));
+	UpdateHttpClient();
+	Format(filePath, sizeof(filePath), "maps/%s_particles.txt", g_sMap);
 
 	// Will be case sensitive on Windows servers if use_valve_fs is false!!!
 	if (FileExists(filePath, true, NULL_STRING))
@@ -55,16 +56,12 @@ public void OnMapStart()
 
 	if (g_smPlayerConnectionTime != null)
 		CloseHandle(g_smPlayerConnectionTime);
-	
-	if (g_smPlayerRetryState != null)
-		CloseHandle(g_smPlayerRetryState);
 
 	if (g_smPlayerCountdown != null)
 		CloseHandle(g_smPlayerCountdown);
 
 	g_smPlayerConnections = CreateTrie();
 	g_smPlayerConnectionTime = CreateTrie();
-	g_smPlayerRetryState = CreateTrie();
 	g_smPlayerCountdown = CreateTrie();
 }
 
@@ -135,9 +132,6 @@ void OnApiHttpResponse(HTTPResponse response, any data)
 	char steamID[32];
 	GetClientAuthId(client, AuthId_SteamID64, steamID, sizeof(steamID));
 
-	int playerRetryState = 0;
-	GetTrieValue(g_smPlayerRetryState, steamID, playerRetryState);
-
 	JSONObject json = view_as<JSONObject>(response.Data);
 
 	if (json.GetBool("clientDownloaded"))
@@ -145,7 +139,7 @@ void OnApiHttpResponse(HTTPResponse response, any data)
 		int playerConnectionTime = 0;
 		GetTrieValue(g_smPlayerConnectionTime, steamID, playerConnectionTime);
 
-		if ((playerConnectionTime + 5) < GetTime() || playerRetryState == 1)
+		if ((playerConnectionTime + 5) < GetTime())
 		{
 			SetTrieValue(g_smPlayerCountdown, steamID, 5);
 			CreateTimer(0.0, CountdownTimer, data);
@@ -160,27 +154,8 @@ void OnApiHttpResponse(HTTPResponse response, any data)
 			ClientCommand(client, "retry");
 		}
 	}
-	else if (playerRetryState == 0)
-	{
-		//so fun thing, apparently there is a small chance cloudflare will not return a map download request if it is requested too soon
-		//to keep fast retries for the majority of requests that do work properly initially, we just do a double check 60 seconds after any false response from the api
-		CreateTimer(60.0, ApiRetryTimer, data);
-		SetTrieValue(g_smPlayerRetryState, steamID, 1);
-	}
 
 	CloseHandle(json);
-}
-
-public Action ApiRetryTimer(Handle timer, int userid)
-{
-	int client = GetClientOfUserId(userid);
-
-	if (!IsValidClient(client))
-		return Plugin_Handled;
-
-	SendApiHttpRequest(client);
-
-	return Plugin_Handled;
 }
 
 public Action CountdownTimer(Handle timer, int userid)
@@ -215,15 +190,11 @@ public Action RetryTimer(Handle timer, int userid)
 
 void SendApiHttpRequest(int client)
 {
-	char url[PLATFORM_MAX_PATH];
 	char ip[32];
-	char map[128];
-
 	GetClientIP(client, ip, sizeof(ip));
-	GetCurrentMap(map, sizeof(map));
-	Format(url, sizeof(url), "clientdownloaded/%s/%s", ip, map);
 
-	g_hHTTPClient.Get(url, OnApiHttpResponse, GetClientUserId(client));
+	g_hHTTPClient.SetHeader("ClientIP", ip);
+	g_hHTTPClient.Get("", OnApiHttpResponse, GetClientUserId(client));
 }
 
 void UpdateHttpClient()
@@ -239,6 +210,7 @@ void UpdateHttpClient()
 	
 	g_hHTTPClient = new HTTPClient(apiUrl);
 	g_hHTTPClient.SetHeader("Token", token);
+	g_hHTTPClient.SetHeader("Map", g_sMap);
 	g_hHTTPClient.ConnectTimeout = 60;
 }
 

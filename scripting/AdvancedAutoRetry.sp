@@ -32,7 +32,6 @@ public void OnPluginStart()
 
 	RegConsoleCmd("sm_autoretry", Command_AutoRetryToggle, "Toggles the auto retry feature for maps with particles on or off");
 	SetCookieMenuItem(CookieHandler, 0, "Auto Retry");
-	UpdateHttpClient();
 
 	HookConVarChange(g_cvApiUrl, ApiConVarChanged);
 	HookConVarChange(g_cvToken, ApiConVarChanged);
@@ -40,11 +39,12 @@ public void OnPluginStart()
 
 public void OnMapStart()
 {
+	char map[128];
 	char filePath[147];
 
-	GetCurrentMap(g_sMap, sizeof(g_sMap));
-	UpdateHttpClient();
-	Format(filePath, sizeof(filePath), "maps/%s_particles.txt", g_sMap);
+	GetCurrentMap(map, sizeof(map));
+	UpdateHttpClient(map);
+	Format(filePath, sizeof(filePath), "maps/%s_particles.txt", map);
 
 	// Will be case sensitive on Windows servers if use_valve_fs is false!!!
 	if (FileExists(filePath, true, NULL_STRING))
@@ -52,18 +52,24 @@ public void OnMapStart()
 	else
 		g_bParticles = false;
 
-	if (g_smPlayerConnections != null)
-		CloseHandle(g_smPlayerConnections);
+	// Don't reset StringMaps if not changing to a different map, this helps prevent double retries after a map reload
+	if (!StrEqual(map, g_sMap, false))
+	{
+		if (g_smPlayerConnections != null)
+			CloseHandle(g_smPlayerConnections);
 
-	if (g_smPlayerConnectionTime != null)
-		CloseHandle(g_smPlayerConnectionTime);
+		if (g_smPlayerConnectionTime != null)
+			CloseHandle(g_smPlayerConnectionTime);
 
-	if (g_smPlayerCountdown != null)
-		CloseHandle(g_smPlayerCountdown);
+		if (g_smPlayerCountdown != null)
+			CloseHandle(g_smPlayerCountdown);
 
-	g_smPlayerConnections = CreateTrie();
-	g_smPlayerConnectionTime = CreateTrie();
-	g_smPlayerCountdown = CreateTrie();
+		g_smPlayerConnections = CreateTrie();
+		g_smPlayerConnectionTime = CreateTrie();
+		g_smPlayerCountdown = CreateTrie();
+	}
+
+	g_sMap = map;
 }
 
 public void OnClientCookiesCached(int client)
@@ -105,7 +111,7 @@ public void OnClientPostAdminCheck(int client)
 
 public void ApiConVarChanged(ConVar convar, const char[] oldValue, const char[] newValue)
 {
-	UpdateHttpClient();
+	UpdateHttpClient(g_sMap);
 }
 
 public void CookieHandler(int client, CookieMenuAction action, any info, char[] buffer, int maxlen)
@@ -247,7 +253,7 @@ void SendApiHttpRequest(int client)
 	g_hHTTPClient.Get("", OnApiHttpResponse, GetClientUserId(client));
 }
 
-void UpdateHttpClient()
+void UpdateHttpClient(char[] map)
 {
 	if (g_hHTTPClient != null)
 		CloseHandle(g_hHTTPClient);
@@ -260,7 +266,7 @@ void UpdateHttpClient()
 	
 	g_hHTTPClient = new HTTPClient(apiUrl);
 	g_hHTTPClient.SetHeader("Token", token);
-	g_hHTTPClient.SetHeader("Map", g_sMap);
+	g_hHTTPClient.SetHeader("Map", map);
 	g_hHTTPClient.ConnectTimeout = 60;
 }
 

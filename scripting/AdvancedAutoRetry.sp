@@ -20,6 +20,7 @@ StringMap g_smPlayerConnections, g_smPlayerConnectionTime, g_smPlayerCountdown;
 HTTPClient g_hHTTPClient;
 
 bool g_bParticles = false;
+bool g_bAutoRetryDisabled[MAXPLAYERS+1];
 char g_sMap[128];
 
 public void OnPluginStart()
@@ -27,10 +28,10 @@ public void OnPluginStart()
 	g_cvEnabled = CreateConVar("sm_aar_enabled", "1", "Whether the plugin is enabled or not");
 	g_cvApiUrl = CreateConVar("sm_aar_api_url", "", "URL that the API worker is running at", FCVAR_PROTECTED);
 	g_cvToken = CreateConVar("sm_aar_api_token", "", "Token for the API worker", FCVAR_PROTECTED);
-	g_hAutoRetryDisabled = RegClientCookie("aar_disabled_new", "", CookieAccess_Protected);
+	g_hAutoRetryDisabled = RegClientCookie("aar_disabled_new", "", CookieAccess_Private);
 
 	RegConsoleCmd("sm_autoretry", Command_AutoRetryToggle, "Toggles the auto retry feature for maps with particles on or off");
-
+	SetCookieMenuItem(CookieHandler, 0, "Auto Retry");
 	UpdateHttpClient();
 
 	HookConVarChange(g_cvApiUrl, ApiConVarChanged);
@@ -65,13 +66,17 @@ public void OnMapStart()
 	g_smPlayerCountdown = CreateTrie();
 }
 
+public void OnClientCookiesCached(int client)
+{
+	char cookieState[2];
+	GetClientCookie(client, g_hAutoRetryDisabled, cookieState, sizeof(cookieState));
+	g_bAutoRetryDisabled[client] = StrEqual(cookieState, "1");
+}
+
 public void OnClientPostAdminCheck(int client)
 {
 	if (!g_bParticles || !g_cvEnabled.BoolValue)
 		return;
-
-	char cookieState[2];
-	GetClientCookie(client, g_hAutoRetryDisabled, cookieState, sizeof(cookieState));
 
 	char steamID[32];
 	GetClientAuthId(client, AuthId_SteamID64, steamID, sizeof(steamID));
@@ -83,8 +88,19 @@ public void OnClientPostAdminCheck(int client)
 
 	SetTrieValue(g_smPlayerConnectionTime, steamID, GetTime());
 
-	if (!StrEqual(cookieState, "1") && playerConnections < 2)
-		SendApiHttpRequest(client);
+	if (playerConnections >= 2)
+		return;
+
+	if (AreClientCookiesCached(client))
+	{
+		if (!g_bAutoRetryDisabled[client])
+			SendApiHttpRequest(client);
+	}
+	else
+	{
+		// Late cookie load, keep rechecking until clients cookies are cached
+		CreateTimer(0.5, CookieTimer, GetClientUserId(client), TIMER_REPEAT|TIMER_FLAG_NO_MAPCHANGE);
+	}
 }
 
 public void ApiConVarChanged(ConVar convar, const char[] oldValue, const char[] newValue)
@@ -92,18 +108,34 @@ public void ApiConVarChanged(ConVar convar, const char[] oldValue, const char[] 
 	UpdateHttpClient();
 }
 
+public void CookieHandler(int client, CookieMenuAction action, any info, char[] buffer, int maxlen)
+{
+	if (action == CookieMenuAction_DisplayOption)
+	{
+		FormatEx(buffer, maxlen, "Auto Retry: %s", g_bAutoRetryDisabled[client] ? "Disabled" : "Enabled");
+	}
+	else if (action == CookieMenuAction_SelectOption)
+	{
+		AutoRetryToggle(client);
+		ShowCookieMenu(client);
+	}
+}
+
 public Action Command_AutoRetryToggle(int client, int args)
 {
 	if (!IsValidClient(client))
 		return Plugin_Handled;
 
-	char cookieState[2];
-	GetClientCookie(client, g_hAutoRetryDisabled, cookieState, sizeof(cookieState));
-
-	SetClientCookie(client, g_hAutoRetryDisabled, StrEqual(cookieState, "1") ? "" : "1");
-	PrintToChat(client, " \x0F[AdvancedAutoRetry] \x05Auto retry after downloading maps with particles has been %s", StrEqual(cookieState, "1") ? "enabled" : "disabled");
+	AutoRetryToggle(client);
 
 	return Plugin_Handled;
+}
+
+void AutoRetryToggle(int client)
+{
+	g_bAutoRetryDisabled[client] = !g_bAutoRetryDisabled[client];
+	SetClientCookie(client, g_hAutoRetryDisabled, g_bAutoRetryDisabled[client] ? "1" : "");
+	PrintToChat(client, " \x0F[AdvancedAutoRetry] \x05Auto retry after downloading maps with particles has been %s", g_bAutoRetryDisabled[client] ? "disabled" : "enabled");
 }
 
 void OnApiHttpResponse(HTTPResponse response, any data)
@@ -156,6 +188,24 @@ void OnApiHttpResponse(HTTPResponse response, any data)
 	}
 
 	CloseHandle(json);
+}
+
+public Action CookieTimer(Handle timer, int userid)
+{
+	int client = GetClientOfUserId(userid);
+
+	if (!IsValidClient(client))
+		return Plugin_Stop;
+
+	if (AreClientCookiesCached(client))
+	{
+		if (!g_bAutoRetryDisabled[client])
+			SendApiHttpRequest(client);
+
+		return Plugin_Stop;
+	}
+
+	return Plugin_Continue;
 }
 
 public Action CountdownTimer(Handle timer, int userid)
@@ -214,7 +264,7 @@ void UpdateHttpClient()
 	g_hHTTPClient.ConnectTimeout = 60;
 }
 
-bool IsValidClient(int client, bool nobots = false)
+bool IsValidClient(int client, bool nobots = true)
 {
 	if (client <= 0 || client > MaxClients || !IsClientConnected(client) || (nobots && IsFakeClient(client)))
 		return false;

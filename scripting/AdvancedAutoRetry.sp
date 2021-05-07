@@ -16,7 +16,7 @@ public Plugin myinfo =
 
 ConVar g_cvEnabled, g_cvApiUrl, g_cvToken;
 Handle g_hAutoRetryDisabled;
-StringMap g_smPlayerConnections, g_smPlayerConnectionTime, g_smPlayerCountdown;
+StringMap g_smPlayerConnections, g_smPlayerConnectionTime;
 HTTPClient g_hHTTPClient;
 
 bool g_bParticles = false;
@@ -61,12 +61,8 @@ public void OnMapStart()
 		if (g_smPlayerConnectionTime != null)
 			CloseHandle(g_smPlayerConnectionTime);
 
-		if (g_smPlayerCountdown != null)
-			CloseHandle(g_smPlayerCountdown);
-
 		g_smPlayerConnections = CreateTrie();
 		g_smPlayerConnectionTime = CreateTrie();
-		g_smPlayerCountdown = CreateTrie();
 	}
 
 	g_sMap = map;
@@ -177,15 +173,13 @@ void OnApiHttpResponse(HTTPResponse response, any data)
 		int playerConnectionTime = 0;
 		GetTrieValue(g_smPlayerConnectionTime, steamID, playerConnectionTime);
 
+		// Show a warning countdown to the player if we weren't able to get the API data we needed fast enough for a quick retry
 		if ((playerConnectionTime + 5) < GetTime())
 		{
-			SetTrieValue(g_smPlayerCountdown, steamID, 5);
-			CreateTimer(0.0, CountdownTimer, data);
-			CreateTimer(1.0, CountdownTimer, data);
-			CreateTimer(2.0, CountdownTimer, data);
-			CreateTimer(3.0, CountdownTimer, data);
-			CreateTimer(4.0, CountdownTimer, data);
-			CreateTimer(5.0, RetryTimer, data);
+			DataPack dp;
+			CreateDataTimer(1.0, RetryTimer, dp);
+			dp.WriteCell(data);
+			dp.WriteCell(5);
 		}
 		else
 		{
@@ -214,34 +208,32 @@ public Action CookieTimer(Handle timer, int userid)
 	return Plugin_Continue;
 }
 
-public Action CountdownTimer(Handle timer, int userid)
+public Action RetryTimer(Handle timer, DataPack data)
 {
+	data.Reset();
+	int userid = data.ReadCell();
 	int client = GetClientOfUserId(userid);
+	int seconds = data.ReadCell();
 
 	if (!IsValidClient(client))
 		return Plugin_Handled;
 
-	char steamID[32];
-	GetClientAuthId(client, AuthId_SteamID64, steamID, sizeof(steamID));
+	if (seconds > 0)
+	{
+		PrintToChat(client, " \x0F[AdvancedAutoRetry] \x05Your downloading of the map was detected late, you will be auto retried in %i seconds", seconds);
 
-	int seconds = 0;
-	GetTrieValue(g_smPlayerCountdown, steamID, seconds);
-	PrintToChat(client, " \x0F[AdvancedAutoRetry] \x05Your downloading of the map was detected late, you will be auto retried in %i seconds", seconds);
-	SetTrieValue(g_smPlayerCountdown, steamID, seconds - 1);
+		DataPack dp;
+		CreateDataTimer(1.0, RetryTimer, dp);
+		dp.WriteCell(userid);
+		dp.WriteCell(seconds - 1);
 
-	return Plugin_Handled;
-}
-
-public Action RetryTimer(Handle timer, int userid)
-{
-	int client = GetClientOfUserId(userid);
-
-	if (!IsValidClient(client))
 		return Plugin_Handled;
-
-	ClientCommand(client, "retry");
-
-	return Plugin_Handled;
+	}
+	else
+	{
+		ClientCommand(client, "retry");
+		return Plugin_Handled;
+	}
 }
 
 void SendApiHttpRequest(int client)

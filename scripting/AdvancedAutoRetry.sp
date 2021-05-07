@@ -10,7 +10,7 @@ public Plugin myinfo =
 	name = "Advanced Auto Retry",
 	author = "Vauff",
 	description = "A toggleable auto retry system for custom particles that only retries players when actually necessary",
-	version = "1.2",
+	version = "1.3",
 	url = "https://github.com/Vauff/AdvancedAutoRetry"
 };
 

@@ -10,18 +10,17 @@ public Plugin myinfo =
 	name = "Advanced Auto Retry",
 	author = "Vauff",
 	description = "A toggleable auto retry system for custom particles that only retries players when actually necessary",
-	version = "1.3",
+	version = "1.3.1",
 	url = "https://github.com/Vauff/AdvancedAutoRetry"
 };
 
 ConVar g_cvEnabled, g_cvApiUrl, g_cvToken;
 Handle g_hAutoRetryDisabled;
 StringMap g_smPlayerConnections, g_smPlayerConnectionTime;
-HTTPClient g_hHTTPClient;
 
 bool g_bParticles = false;
 bool g_bAutoRetryDisabled[MAXPLAYERS+1];
-char g_sMap[128];
+char g_sMap[128], g_sApiUrl[256], g_sToken[256];
 
 public void OnPluginStart()
 {
@@ -35,6 +34,7 @@ public void OnPluginStart()
 
 	HookConVarChange(g_cvApiUrl, ApiConVarChanged);
 	HookConVarChange(g_cvToken, ApiConVarChanged);
+	AutoExecConfig(true, "AdvancedAutoRetry");
 }
 
 public void OnMapStart()
@@ -43,7 +43,6 @@ public void OnMapStart()
 	char filePath[147];
 
 	GetCurrentMap(map, sizeof(map));
-	UpdateHttpClient(map);
 	Format(filePath, sizeof(filePath), "maps/%s_particles.txt", map);
 
 	// Will be case sensitive on Windows servers if use_valve_fs is false!!!
@@ -107,7 +106,8 @@ public void OnClientPostAdminCheck(int client)
 
 public void ApiConVarChanged(ConVar convar, const char[] oldValue, const char[] newValue)
 {
-	UpdateHttpClient(g_sMap);
+	g_cvApiUrl.GetString(g_sApiUrl, sizeof(g_sApiUrl));
+	g_cvToken.GetString(g_sToken, sizeof(g_sToken));
 }
 
 public void CookieHandler(int client, CookieMenuAction action, any info, char[] buffer, int maxlen)
@@ -241,25 +241,11 @@ void SendApiHttpRequest(int client)
 	char ip[32];
 	GetClientIP(client, ip, sizeof(ip));
 
-	g_hHTTPClient.SetHeader("ClientIP", ip);
-	g_hHTTPClient.Get("", OnApiHttpResponse, GetClientUserId(client));
-}
-
-void UpdateHttpClient(char[] map)
-{
-	if (g_hHTTPClient != null)
-		CloseHandle(g_hHTTPClient);
-	
-	char apiUrl[256];
-	g_cvApiUrl.GetString(apiUrl, sizeof(apiUrl));
-
-	char token[128];
-	g_cvToken.GetString(token, sizeof(token));
-	
-	g_hHTTPClient = new HTTPClient(apiUrl);
-	g_hHTTPClient.SetHeader("Token", token);
-	g_hHTTPClient.SetHeader("Map", map);
-	g_hHTTPClient.ConnectTimeout = 60;
+	HTTPRequest httpRequest = new HTTPRequest(g_sApiUrl);
+	httpRequest.SetHeader("Token", g_sToken);
+	httpRequest.SetHeader("Map", g_sMap);
+	httpRequest.SetHeader("ClientIP", ip);
+	httpRequest.Get(OnApiHttpResponse, GetClientUserId(client));
 }
 
 bool IsValidClient(int client, bool nobots = true)
